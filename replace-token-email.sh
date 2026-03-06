@@ -11,23 +11,38 @@
 #    bash replace-token-email.sh /path/to/config-apitoken-email.conf
 # =============================================================
 
-# ─── โหลด Config ─────────────────────────────────────────────
+VERSION="v1"
+
+# ─── โหลด Config หรือถามแบบ Interactive ─────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${1:-${SCRIPT_DIR}/config-apitoken-email.conf}"
 
+CONF_URL="https://raw.githubusercontent.com/AnonymousVS/litespeed-cloudflare-api-email/refs/heads/main/config-apitoken-email.conf"
+
 if [[ ! -f "$CONFIG_FILE" ]]; then
-    echo "❌ ERROR: ไม่พบไฟล์ config: $CONFIG_FILE"
-    echo "   ดาวน์โหลด config ตัวอย่างได้ที่:"
-    echo "   https://raw.githubusercontent.com/AnonymousVS/litespeed-cloudflare-api-email/main/config-apitoken-email.conf"
-    exit 1
+    # ── ไม่มีไฟล์ config → ดาวน์โหลดจาก GitHub แล้วเปิดแก้ ──
+    echo ""
+    echo "📥 ดาวน์โหลด config จาก GitHub..."
+    if ! curl -fsSL "$CONF_URL" -o "$CONFIG_FILE"; then
+        echo "❌ ERROR: ดาวน์โหลด config ไม่สำเร็จ — ตรวจสอบการเชื่อมต่อ"
+        exit 1
+    fi
+    echo "✅ ดาวน์โหลดสำเร็จ → $CONFIG_FILE"
+    echo ""
+    echo "📝 เปิด config เพื่อแก้ไข — กรอก CF_KEY และ CF_EMAIL แล้วบันทึก"
+    echo "   (nano: Ctrl+O บันทึก, Ctrl+X ออก)"
+    echo ""
+    sleep 1
+    nano "$CONFIG_FILE"
+    echo ""
 fi
 
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
 
-# ─── Validate Config ─────────────────────────────────────────
+# ─── Validate ─────────────────────────────────────────────────
 if [[ -z "$CF_KEY" || "$CF_KEY" == "YOUR_API_TOKEN_OR_GLOBAL_KEY_HERE" ]]; then
-    echo "❌ ERROR: กรุณาตั้งค่า CF_KEY ใน $CONFIG_FILE ก่อนรัน"
+    echo "❌ ERROR: CF_KEY ว่างเปล่า — กรุณาใส่ API Token หรือ Global API Key"
     exit 1
 fi
 
@@ -39,15 +54,47 @@ else
     CF_AUTH_MODE="token"
 fi
 
+# ─── แสดงค่าที่จะใช้ + ขอ Confirm ──────────────────────────
+echo ""
+echo "╔══════════════════════════════════════════════════════════════"
+echo "║   🔄  คุณต้องการเปลี่ยน Cloudflare CDN ค่าใหม่ ดังนี้"
+echo "╠══════════════════════════════════════════════════════════════"
+echo "║   Version    :  $VERSION"
+echo "║"
+if [[ "$CF_AUTH_MODE" == "token" ]]; then
+echo "║   Auth Mode  :  API Token"
+echo "║   API Token  :  ${CF_KEY:0:8}...${CF_KEY: -4}"
+echo "║   Email      :  (ไม่ใช้ — Token mode)"
+else
+echo "║   Auth Mode  :  Global API Key"
+echo "║   API Key    :  ${CF_KEY:0:8}...${CF_KEY: -4}"
+echo "║   Email      :  $CF_EMAIL"
+fi
+echo "║"
+echo "║   Only Active CF :  $CF_ONLY_ACTIVE"
+echo "║   Overwrite Key  :  $CF_OVERWRITE_KEY"
+echo "║"
+echo "╚══════════════════════════════════════════════════════════════"
+echo ""
+read -rp "  ▶  ยืนยันการเปลี่ยนค่า? [y/N] : " _CONFIRM
+echo ""
+if [[ ! "$_CONFIRM" =~ ^[Yy]$ ]]; then
+    echo "🚫 ยกเลิกการทำงาน"
+    exit 0
+fi
+
 # ─── ค่า Runtime ─────────────────────────────────────────────
 MAX_JOBS=5
 WP_TIMEOUT=30
+MAX_RETRY=3
+RETRY_DELAY=5
 
 LOG_FILE="/var/log/lscwp-cf-update.log"
 LOG_PASS="/var/log/lscwp-cf-update-pass.log"
 LOG_FAIL="/var/log/lscwp-cf-update-fail.log"
 LOG_SKIP="/var/log/lscwp-cf-update-skip.log"
 LOG_NOCHANGE="/var/log/lscwp-cf-update-nochange.log"
+LOG_MISMATCH="/var/log/lscwp-cf-update-mismatch.log"
 LOCK_FILE="${LOG_FILE}.lock"
 RESULT_DIR="/tmp/lscwp-cf-update-$$"
 mkdir -p "$RESULT_DIR"
@@ -58,22 +105,13 @@ log() {
     ( flock 200; echo "[$ts] $1" >> "$LOG_FILE" ) 200>"$LOCK_FILE"
 }
 
-log_result() {
-    local ts; ts=$(date '+%Y-%m-%d %H:%M:%S')
-    case "$1" in
-        pass)     ( flock 201; echo "[$ts] $2" >> "$LOG_PASS"     ) 201>"${LOG_FILE}.pass.lock" ;;
-        fail)     ( flock 202; echo "[$ts] $2" >> "$LOG_FAIL"     ) 202>"${LOG_FILE}.fail.lock" ;;
-        skip)     ( flock 203; echo "[$ts] $2" >> "$LOG_SKIP"     ) 203>"${LOG_FILE}.skip.lock" ;;
-        nochange) ( flock 204; echo "[$ts] $2" >> "$LOG_NOCHANGE" ) 204>"${LOG_FILE}.nochange.lock" ;;
-    esac
-}
-
 cleanup() {
     wait
     rm -rf "$RESULT_DIR"
     rm -f "$LOCK_FILE" \
           "${LOG_FILE}.pass.lock" "${LOG_FILE}.fail.lock" \
-          "${LOG_FILE}.skip.lock" "${LOG_FILE}.nochange.lock"
+          "${LOG_FILE}.skip.lock" "${LOG_FILE}.nochange.lock" \
+          "${LOG_FILE}.mismatch.lock"
 }
 trap cleanup EXIT
 
@@ -89,16 +127,16 @@ fi
 > "$LOG_FAIL"
 > "$LOG_SKIP"
 > "$LOG_NOCHANGE"
+> "$LOG_MISMATCH"
 
 START_TIME=$(date +%s)
 log "======================================"
-log " BULK UPDATE CF CREDENTIALS (LiteSpeed)"
+log " BULK UPDATE CF CREDENTIALS (LiteSpeed)  $VERSION"
 log " เริ่มเวลา    : $(date '+%Y-%m-%d %H:%M:%S')"
 log " Config       : $CONFIG_FILE"
 log " Auth Mode    : $CF_AUTH_MODE (auto-detect)"
 log " Email        : ${CF_EMAIL:-"(ไม่ใช้ — Token mode)"}"
 log " Key (prefix) : ${CF_KEY:0:8}..."
-log " Clear Zone   : $CF_CLEAR_ZONE"
 log " Only Active  : $CF_ONLY_ACTIVE"
 log " Overwrite Key: $CF_OVERWRITE_KEY"
 log " Jobs         : $MAX_JOBS"
@@ -162,6 +200,7 @@ process_site() {
             fail)     ( flock 202; echo "[$ts] $2" >> "$LOG_FAIL"     ) 202>"${LOG_FILE}.fail.lock" ;;
             skip)     ( flock 203; echo "[$ts] $2" >> "$LOG_SKIP"     ) 203>"${LOG_FILE}.skip.lock" ;;
             nochange) ( flock 204; echo "[$ts] $2" >> "$LOG_NOCHANGE" ) 204>"${LOG_FILE}.nochange.lock" ;;
+            mismatch) ( flock 205; echo "[$ts] $2" >> "$LOG_MISMATCH" ) 205>"${LOG_FILE}.mismatch.lock" ;;
         esac
     }
 
@@ -191,45 +230,102 @@ process_site() {
             return;
         }
 
-        // ── 5. เขียน Credentials ใหม่ลง DB ───────────────────
+        // ── 5. Auto-fix domain ให้ตรงกับ folder ──────────────
+        $folder = basename(rtrim(ABSPATH, "/"));
+        if ($folder === "public_html") {
+            $folder = basename(dirname(rtrim(ABSPATH, "/")));
+        }
+        $name_clean = preg_replace("#^https?://#", "", rtrim($cur_name, "/"));
+        $was_fixed  = false;
+        if ($folder && $name_clean && $folder !== $name_clean) {
+            $cur_name  = $folder;
+            $was_fixed = true;
+        }
+
+        // ── 6. เขียน Credentials ใหม่ลง DB ───────────────────
         $new_key   = '"'"'$CF_KEY'"'"';
         $new_email = '"'"'$CF_EMAIL'"'"';
-
-        // auto-detect: มี email → apikey mode / ไม่มี → token mode
         $is_apikey = ($new_email !== "");
 
-        update_option("litespeed.conf.cdn-cloudflare_key", $new_key);
+        update_option("litespeed.conf.cdn-cloudflare_key",   $new_key);
+        update_option("litespeed.conf.cdn-cloudflare_name",  $cur_name);
+        update_option("litespeed.conf.cdn-cloudflare_zone",  "");
 
         if ($is_apikey) {
             update_option("litespeed.conf.cdn-cloudflare_email", $new_email);
         } else {
-            // token mode → ล้าง email ออก (ไม่ใช้)
             update_option("litespeed.conf.cdn-cloudflare_email", "");
         }
 
-        // ── 6. CF_CLEAR_ZONE : ล้าง zone_id ─────────────────
-        $clear_zone = ('"'"'$CF_CLEAR_ZONE'"'"' === "yes");
-        if ($clear_zone) {
-            update_option("litespeed.conf.cdn-cloudflare_zone", "");
+        // ── 7. ดึง Zone ID จาก Cloudflare API ────────────────
+        $max_retry   = '"'"'$MAX_RETRY'"'"';
+        $retry_delay = '"'"'$RETRY_DELAY'"'"';
+        $zone_id     = "";
+        $zone_name   = "";
+        $cf_error    = "";
+        $attempt     = 0;
+
+        $headers = $is_apikey
+            ? ["X-Auth-Email: $new_email", "X-Auth-Key: $new_key", "Content-Type: application/json"]
+            : ["Authorization: Bearer $new_key",                    "Content-Type: application/json"];
+
+        while ($attempt < $max_retry) {
+            $attempt++;
+            $url = "https://api.cloudflare.com/client/v4/zones?status=active&match=all&name=" . urlencode($cur_name);
+            $ch  = curl_init();
+            curl_setopt($ch, CURLOPT_URL,            $url);
+            curl_setopt($ch, CURLOPT_HTTPHEADER,     $headers);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_TIMEOUT,        10);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+            $raw      = curl_exec($ch);
+            $http     = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $curl_err = curl_error($ch);
+            curl_close($ch);
+
+            if ($curl_err) {
+                $cf_error = "curl:" . $curl_err;
+                if ($attempt < $max_retry) { sleep($retry_delay); continue; }
+                break;
+            }
+            $res = json_decode($raw, true);
+            if ($http !== 200 || empty($res["success"])) {
+                $cf_error = "http:" . $http . " err:" . json_encode($res["errors"] ?? []);
+                if ($attempt < $max_retry) { sleep($retry_delay); continue; }
+                break;
+            }
+            $zone_id   = $res["result"][0]["id"]   ?? "";
+            $zone_name = $res["result"][0]["name"] ?? $cur_name;
+            if ($zone_id) break;
+            $cf_error = "zone_empty";
+            if ($attempt < $max_retry) sleep($retry_delay);
         }
 
-        // ── 7. Verify อ่านกลับมาตรวจ ────────────────────────
-        $v_key   = trim((string) get_option("litespeed.conf.cdn-cloudflare_key",   ""));
-        $v_email = trim((string) get_option("litespeed.conf.cdn-cloudflare_email", ""));
-        $v_zone  = trim((string) get_option("litespeed.conf.cdn-cloudflare_zone",  ""));
+        // ── 8. บันทึก Zone ID ลง DB ──────────────────────────
+        if ($zone_id) {
+            update_option("litespeed.conf.cdn-cloudflare_zone", $zone_id);
+            update_option("litespeed.conf.cdn-cloudflare_name", $zone_name);
+        }
 
-        $key_ok = ($v_key === $new_key) ? 1 : 0;
+        // ── 9. Verify ─────────────────────────────────────────
+        $v_key   = trim((string) get_option("litespeed.conf.cdn-cloudflare_key",   ""));
+        $v_zone  = trim((string) get_option("litespeed.conf.cdn-cloudflare_zone",  ""));
+        $v_email = trim((string) get_option("litespeed.conf.cdn-cloudflare_email", ""));
+        $key_ok  = ($v_key === $new_key) ? 1 : 0;
 
         printf(
-            "STATUS:DONE\tKEY_OK:%d\tDOMAIN:%s\tOLD_KEY:%s\tNEW_KEY:%s\tOLD_EMAIL:%s\tNEW_EMAIL:%s\tOLD_ZONE:%s\tNEW_ZONE:%s",
+            "STATUS:DONE\tKEY_OK:%d\tDOMAIN:%s\tOLD_KEY:%s\tNEW_KEY:%s\tOLD_EMAIL:%s\tNEW_EMAIL:%s\tOLD_ZONE:%s\tNEW_ZONE:%s\tFIXED:%d\tATTEMPT:%d\tCF_ERROR:%s",
             $key_ok,
-            $cur_name,
-            substr($cur_key,   0, 8),
-            substr($v_key,     0, 8),
+            $zone_name ?: $cur_name,
+            substr($cur_key,  0, 8),
+            substr($v_key,    0, 8),
             $cur_email,
             $v_email,
-            $cur_zone   ? substr($cur_zone, 0, 12)."..." : "(empty)",
-            $v_zone     ?: "(cleared)"
+            $cur_zone ? substr($cur_zone, 0, 12)."..." : "(empty)",
+            $v_zone   ?: "(no zone)",
+            $was_fixed ? 1 : 0,
+            $attempt,
+            $cf_error
         );
     ' --allow-root 2>/dev/null)
 
@@ -238,7 +334,7 @@ process_site() {
 
     case "$STATUS" in
         DONE)
-            local KEY_OK DOMAIN OLD_KEY NEW_KEY OLD_EMAIL NEW_EMAIL OLD_ZONE NEW_ZONE
+            local KEY_OK DOMAIN OLD_KEY NEW_KEY OLD_EMAIL NEW_EMAIL OLD_ZONE NEW_ZONE FIXED ATTEMPT CF_ERROR
             KEY_OK=$(    echo "$EVAL_OUT" | grep -oP '(?<=KEY_OK:)\d+')
             DOMAIN=$(    echo "$EVAL_OUT" | grep -oP '(?<=DOMAIN:)[^\t]*')
             OLD_KEY=$(   echo "$EVAL_OUT" | grep -oP '(?<=OLD_KEY:)[^\t]*')
@@ -247,14 +343,29 @@ process_site() {
             NEW_EMAIL=$( echo "$EVAL_OUT" | grep -oP '(?<=NEW_EMAIL:)[^\t]*')
             OLD_ZONE=$(  echo "$EVAL_OUT" | grep -oP '(?<=OLD_ZONE:)[^\t]*')
             NEW_ZONE=$(  echo "$EVAL_OUT" | grep -oP '(?<=NEW_ZONE:)[^\t]*')
+            FIXED=$(     echo "$EVAL_OUT" | grep -oP '(?<=FIXED:)\d+')
+            ATTEMPT=$(   echo "$EVAL_OUT" | grep -oP '(?<=ATTEMPT:)\d+')
+            CF_ERROR=$(  echo "$EVAL_OUT" | grep -oP '(?<=CF_ERROR:)[^\t]*')
+            local FIX_TAG=""
+            [[ "$FIXED" == "1" ]] && FIX_TAG=" | ⚙️ domain ถูกแก้อัตโนมัติ"
 
-            if [[ "$KEY_OK" == "1" ]]; then
-                _log  "✅ PASS: $LABEL | domain=$DOMAIN | key: ${OLD_KEY}... → ${NEW_KEY}... | zone: $OLD_ZONE → $NEW_ZONE"
-                _log_r pass "$SITE | domain=$DOMAIN | old_key=${OLD_KEY}... | new_key=${NEW_KEY}... | old_email=$OLD_EMAIL | new_email=$NEW_EMAIL | zone: $OLD_ZONE → $NEW_ZONE"
+            if [[ "$KEY_OK" == "1" && "$NEW_ZONE" != "(no zone)" ]]; then
+                _log  "✅ PASS: $LABEL | domain=$DOMAIN | key: ${OLD_KEY}... → ${NEW_KEY}... | zone: $OLD_ZONE → $NEW_ZONE | attempt=${ATTEMPT}/${MAX_RETRY}${FIX_TAG}"
+                _log_r pass "$SITE | domain=$DOMAIN | old_key=${OLD_KEY}... | new_key=${NEW_KEY}... | old_email=$OLD_EMAIL | new_email=$NEW_EMAIL | zone: $OLD_ZONE → $NEW_ZONE | attempt=${ATTEMPT}/${MAX_RETRY}${FIX_TAG}"
+                [[ "$FIXED" == "1" ]] && _log_r mismatch "$SITE | domain ถูกแก้อัตโนมัติ → $DOMAIN"
                 touch "${RESULT_DIR}/pass_${UNIQ}"
+                [[ "$FIXED" == "1" ]] && touch "${RESULT_DIR}/mismatch_${UNIQ}"
+            elif [[ "$KEY_OK" == "1" && "$CF_ERROR" == "zone_empty" ]]; then
+                _log  "🌐 NOTCF: $LABEL | domain=$DOMAIN | domain ไม่อยู่ใน CF account${FIX_TAG}"
+                _log_r fail "$SITE | domain=$DOMAIN | key อัปเดตแล้ว แต่ domain ไม่อยู่ใน CF | attempt=${ATTEMPT}/${MAX_RETRY}${FIX_TAG}"
+                touch "${RESULT_DIR}/fail_${UNIQ}"
+            elif [[ "$KEY_OK" == "1" ]]; then
+                _log  "❌ FAIL (CF API error): $LABEL | domain=$DOMAIN | error=$CF_ERROR | attempt=${ATTEMPT}/${MAX_RETRY}${FIX_TAG}"
+                _log_r fail "$SITE | domain=$DOMAIN | key อัปเดตแล้ว แต่ดึง zone ไม่ได้ | error=$CF_ERROR | attempt=${ATTEMPT}/${MAX_RETRY}${FIX_TAG}"
+                touch "${RESULT_DIR}/fail_${UNIQ}"
             else
-                _log  "❌ FAIL (verify ไม่ผ่าน): $LABEL | domain=$DOMAIN"
-                _log_r fail "$SITE | domain=$DOMAIN | verify failed — key ไม่ตรง"
+                _log  "❌ FAIL (verify key ไม่ผ่าน): $LABEL | domain=$DOMAIN${FIX_TAG}"
+                _log_r fail "$SITE | domain=$DOMAIN | verify failed — key ไม่ตรง${FIX_TAG}"
                 touch "${RESULT_DIR}/fail_${UNIQ}"
             fi
             ;;
@@ -285,8 +396,8 @@ process_site() {
 }
 
 export -f process_site
-export LOG_FILE LOCK_FILE LOG_PASS LOG_FAIL LOG_SKIP LOG_NOCHANGE RESULT_DIR
-export WP_TIMEOUT CF_KEY CF_EMAIL CF_AUTH_MODE CF_CLEAR_ZONE CF_ONLY_ACTIVE CF_OVERWRITE_KEY
+export LOG_FILE LOCK_FILE LOG_PASS LOG_FAIL LOG_SKIP LOG_NOCHANGE LOG_MISMATCH RESULT_DIR
+export WP_TIMEOUT MAX_RETRY RETRY_DELAY CF_KEY CF_EMAIL CF_ONLY_ACTIVE CF_OVERWRITE_KEY
 
 # ─── รัน parallel ────────────────────────────────────────────
 declare -a PIDS=()
@@ -309,7 +420,8 @@ ELAPSED=$(( END_TIME - START_TIME ))
 SUCCESS=$(  find "$RESULT_DIR" -name "pass_*"     2>/dev/null | wc -l)
 FAILED=$(   find "$RESULT_DIR" -name "fail_*"     2>/dev/null | wc -l)
 SKIPPED=$(  find "$RESULT_DIR" -name "skip_*"     2>/dev/null | wc -l)
-NOCHANGE=$( find "$RESULT_DIR" -name "nochange_*" 2>/dev/null | wc -l)
+NOCHANGE=$( find "$RESULT_DIR" -name "nochange_*"  2>/dev/null | wc -l)
+MISMATCH=$( find "$RESULT_DIR" -name "mismatch_*"  2>/dev/null | wc -l)
 
 log "======================================"
 log " สรุปผลรวม"
@@ -318,6 +430,7 @@ log " ✅ Pass (อัปเดต) : $SUCCESS เว็บ"
 log " ⏩ Nochange       : $NOCHANGE เว็บ  (มี key อยู่แล้ว ข้ามตาม CF_OVERWRITE_KEY=no)"
 log " ❌ Fail          : $FAILED เว็บ"
 log " ⏭  Skip          : $SKIPPED เว็บ  (plugin ไม่ active / CF ปิด)"
+log " ⚙️  Auto-fixed    : $MISMATCH เว็บ  (domain ถูกแก้อัตโนมัติจาก folder name)"
 log " เวลาที่ใช้       : $(( ELAPSED / 60 )) นาที $(( ELAPSED % 60 )) วินาที"
 log "======================================"
 log " Log รวม         : $LOG_FILE"
@@ -325,6 +438,7 @@ log " ✅ Pass          : $LOG_PASS"
 log " ❌ Fail          : $LOG_FAIL"
 log " ⏩ Nochange       : $LOG_NOCHANGE"
 log " ⏭  Skip          : $LOG_SKIP"
+log " ⚙️  Auto-fixed    : $LOG_MISMATCH"
 log "======================================"
 
 exit 0
