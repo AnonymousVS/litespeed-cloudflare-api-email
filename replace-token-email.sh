@@ -14,8 +14,7 @@
 VERSION="v1"
 
 # ─── โหลด Config หรือถามแบบ Interactive ─────────────────────
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${1:-${SCRIPT_DIR}/config-apitoken-email.conf}"
+CONFIG_FILE="${1:-/root/config-apitoken-email.conf}"
 
 CONF_URL="https://raw.githubusercontent.com/AnonymousVS/litespeed-cloudflare-api-email/refs/heads/main/config-apitoken-email.conf"
 
