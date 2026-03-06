@@ -42,8 +42,7 @@ if [[ ! -f "${TARGET_PATH}/wp-config.php" ]]; then
 fi
 
 # ─── โหลด Config ─────────────────────────────────────────────
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${1:-${SCRIPT_DIR}/config-apitoken-email.conf}"
+CONFIG_FILE="${1:-/root/config-apitoken-email.conf}"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo ""
