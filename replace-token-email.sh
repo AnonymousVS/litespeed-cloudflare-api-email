@@ -206,144 +206,145 @@ process_site() {
         esac
     }
 
-    EVAL_OUT=$(timeout "$WP_TIMEOUT" wp --path="$dir" eval '
-        // ── 1. Plugin active? ────────────────────────────────
-        if (!is_plugin_active("litespeed-cache/litespeed-cache.php")) {
-            echo "STATUS:NOPLUGIN"; return;
-        }
+    # ── เขียน PHP ลง temp file ผ่าน heredoc ─────────────────────
+    # bash expand ${CF_KEY} ตอนเขียนไฟล์ → PHP รับค่าตรงๆ ไม่ผ่าน env
+    # หลีกเลี่ยง wp eval '...' ที่ PHP subprocess อาจไม่ inherit env vars
+    local _PHP_FILE
+    _PHP_FILE=$(mktemp /tmp/wp-cf-eval-XXXXXX.php)
+    # shellcheck disable=SC2154
+    cat > "$_PHP_FILE" << PHPEOF
+<?php
+// ── ค่าจาก bash — inject ตอนเขียน temp file (ไม่ใช่ getenv) ──────
+\$_new_key       = '${CF_KEY}';
+\$_new_email     = '${CF_EMAIL}';
+\$_overwrite     = ('${CF_OVERWRITE_KEY}' === 'yes');
+\$_only_active   = ('${CF_ONLY_ACTIVE}'   === 'yes');
+\$_max_retry     = max(1, (int) '${MAX_RETRY}');
+\$_retry_delay   = max(1, (int) '${RETRY_DELAY}');
 
-        // ── 2. อ่าน options ปัจจุบัน ─────────────────────────
-        $cur_enabled = get_option("litespeed.conf.cdn-cloudflare",       "0");
-        $cur_key     = trim((string) get_option("litespeed.conf.cdn-cloudflare_key",   ""));
-        $cur_email   = trim((string) get_option("litespeed.conf.cdn-cloudflare_email", ""));
-        $cur_zone    = trim((string) get_option("litespeed.conf.cdn-cloudflare_zone",  ""));
-        $cur_name    = trim((string) get_option("litespeed.conf.cdn-cloudflare_name",  ""));
+// ── 1. Plugin active? ──────────────────────────────────────────────
+if (!is_plugin_active('litespeed-cache/litespeed-cache.php')) {
+    echo 'STATUS:NOPLUGIN'; return;
+}
 
-        // ── 3. CF_ONLY_ACTIVE : ข้ามถ้า CF ปิดอยู่ ───────────
-        $only_active = (trim((string) getenv("CF_ONLY_ACTIVE")) === "yes");
-        if ($only_active && (!$cur_enabled || $cur_enabled === "0")) {
-            echo "STATUS:SKIP_CFOFF"; return;
-        }
+// ── 2. อ่าน options ปัจจุบัน ─────────────────────────────────────
+\$cur_enabled = get_option('litespeed.conf.cdn-cloudflare',       '0');
+\$cur_key     = trim((string) get_option('litespeed.conf.cdn-cloudflare_key',   ''));
+\$cur_email   = trim((string) get_option('litespeed.conf.cdn-cloudflare_email', ''));
+\$cur_zone    = trim((string) get_option('litespeed.conf.cdn-cloudflare_zone',  ''));
+\$cur_name    = trim((string) get_option('litespeed.conf.cdn-cloudflare_name',  ''));
 
-        // ── 4. ตรวจสอบ key/email — เขียนทับถ้าไม่ตรง ────────
-        $new_key   = trim((string) getenv("CF_KEY"));
-        $new_email = trim((string) getenv("CF_EMAIL"));
-        // trim() ป้องกัน trailing space/newline ใน config ที่ทำให้ === "yes" ไม่ match
-        $overwrite = (trim((string) getenv("CF_OVERWRITE_KEY")) === "yes");
+// ── 3. CF_ONLY_ACTIVE ────────────────────────────────────────────
+if (\$_only_active && (!\$cur_enabled || \$cur_enabled === '0')) {
+    echo 'STATUS:SKIP_CFOFF'; return;
+}
 
-        // ตรวจว่า key/email ใน DB ตรงกับ config หรือไม่
-        $key_match   = ($cur_key !== "" && $cur_key === $new_key);
-        $email_match = ($cur_email === $new_email);
+// ── 4. ตรวจ key/email — NOCHANGE ถ้าตรงครบทั้งคู่ ──────────────
+\$key_match   = (\$cur_key !== '' && \$cur_key === \$_new_key);
+\$email_match = (\$cur_email === \$_new_email);
 
-        // CF_OVERWRITE_KEY=no + มี key อยู่แล้ว + ตรงทั้ง key และ email → ไม่ต้องทำอะไร
-        if (!$overwrite && $cur_key !== "" && $key_match && $email_match) {
-            printf("STATUS:NOCHANGE\tOLD_KEY:%s\tOLD_EMAIL:%s\tDOMAIN:%s",
-                substr($cur_key, 0, 8), $cur_email, $cur_name);
-            return;
-        }
+if (!\$_overwrite && \$cur_key !== '' && \$key_match && \$email_match) {
+    printf("STATUS:NOCHANGE\tOLD_KEY:%s\tOLD_EMAIL:%s\tDOMAIN:%s",
+        substr(\$cur_key, 0, 8), \$cur_email, \$cur_name);
+    return;
+}
 
-        // force_ow=1 หมายถึง: มี key เดิมอยู่แล้ว แต่ key หรือ email ไม่ตรง → ต้องเขียนทับ
-        // ใช้แยกแยะจากกรณี key ว่างเปล่า (fresh install)
-        $force_ow = ($cur_key !== "" && (!$key_match || !$email_match)) ? 1 : 0;
+// force_ow = มี key เดิม แต่ key หรือ email ไม่ตรงกับ config
+\$force_ow = (\$cur_key !== '' && (!\$key_match || !\$email_match)) ? 1 : 0;
 
-        // ── 5. Auto-fix domain ให้ตรงกับ folder ──────────────
-        $folder = basename(rtrim(ABSPATH, "/"));
-        if ($folder === "public_html") {
-            $folder = basename(dirname(rtrim(ABSPATH, "/")));
-        }
-        $name_clean = preg_replace("#^https?://#", "", rtrim($cur_name, "/"));
-        $was_fixed  = false;
-        if ($folder && $name_clean && $folder !== $name_clean) {
-            $cur_name  = $folder;
-            $was_fixed = true;
-        }
+// ── 5. Auto-fix domain จาก folder name ──────────────────────────
+\$folder = basename(rtrim(ABSPATH, '/'));
+if (\$folder === 'public_html') {
+    \$folder = basename(dirname(rtrim(ABSPATH, '/')));
+}
+\$name_clean = preg_replace('#^https?://#', '', rtrim(\$cur_name, '/'));
+\$was_fixed  = false;
+if (\$folder && \$name_clean && \$folder !== \$name_clean) {
+    \$cur_name  = \$folder;
+    \$was_fixed = true;
+}
 
-        // ── 6. เขียน Credentials ใหม่ลง DB ───────────────────
-        $is_apikey = ($new_email !== "");
+// ── 6. เขียน Credentials ลง DB ──────────────────────────────────
+\$is_apikey = (\$_new_email !== '');
 
-        update_option("litespeed.conf.cdn-cloudflare_key",   $new_key);
-        update_option("litespeed.conf.cdn-cloudflare_name",  $cur_name);
-        update_option("litespeed.conf.cdn-cloudflare_zone",  "");
+update_option('litespeed.conf.cdn-cloudflare_key',   \$_new_key);
+update_option('litespeed.conf.cdn-cloudflare_name',  \$cur_name);
+update_option('litespeed.conf.cdn-cloudflare_zone',  '');
+update_option('litespeed.conf.cdn-cloudflare_email', \$is_apikey ? \$_new_email : '');
 
-        if ($is_apikey) {
-            update_option("litespeed.conf.cdn-cloudflare_email", $new_email);
-        } else {
-            update_option("litespeed.conf.cdn-cloudflare_email", "");
-        }
+// ── 7. ดึง Zone ID จาก Cloudflare API ───────────────────────────
+\$zone_id   = '';
+\$zone_name = '';
+\$cf_error  = '';
+\$attempt   = 0;
 
-        // ── 7. ดึง Zone ID จาก Cloudflare API ────────────────
-        // (int) cast บังคับ เพราะ PHP 8 เปรียบ int < string ต่างจาก PHP 7
-        $max_retry   = max(1, (int) getenv("MAX_RETRY"));
-        $retry_delay = max(1, (int) getenv("RETRY_DELAY"));
-        $zone_id     = "";
-        $zone_name   = "";
-        $cf_error    = "";
-        $attempt     = 0;
+\$headers = \$is_apikey
+    ? ['X-Auth-Email: ' . \$_new_email, 'X-Auth-Key: ' . \$_new_key, 'Content-Type: application/json']
+    : ['Authorization: Bearer ' . \$_new_key,                         'Content-Type: application/json'];
 
-        $headers = $is_apikey
-            ? ["X-Auth-Email: $new_email", "X-Auth-Key: $new_key", "Content-Type: application/json"]
-            : ["Authorization: Bearer $new_key",                    "Content-Type: application/json"];
+while (\$attempt < \$_max_retry) {
+    \$attempt++;
+    \$url = 'https://api.cloudflare.com/client/v4/zones?status=active&match=all&name=' . urlencode(\$cur_name);
+    \$ch  = curl_init();
+    curl_setopt(\$ch, CURLOPT_URL,            \$url);
+    curl_setopt(\$ch, CURLOPT_HTTPHEADER,     \$headers);
+    curl_setopt(\$ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt(\$ch, CURLOPT_TIMEOUT,        10);
+    curl_setopt(\$ch, CURLOPT_SSL_VERIFYPEER, true);
+    \$raw      = curl_exec(\$ch);
+    \$http     = curl_getinfo(\$ch, CURLINFO_HTTP_CODE);
+    \$curl_err = curl_error(\$ch);
+    curl_close(\$ch);
 
-        while ($attempt < $max_retry) {
-            $attempt++;
-            $url = "https://api.cloudflare.com/client/v4/zones?status=active&match=all&name=" . urlencode($cur_name);
-            $ch  = curl_init();
-            curl_setopt($ch, CURLOPT_URL,            $url);
-            curl_setopt($ch, CURLOPT_HTTPHEADER,     $headers);
-            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($ch, CURLOPT_TIMEOUT,        10);
-            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
-            $raw      = curl_exec($ch);
-            $http     = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            $curl_err = curl_error($ch);
-            curl_close($ch);
+    if (\$curl_err) {
+        \$cf_error = 'curl:' . \$curl_err;
+        if (\$attempt < \$_max_retry) { sleep(\$_retry_delay); continue; }
+        break;
+    }
+    \$res = json_decode(\$raw, true);
+    if (\$http !== 200 || empty(\$res['success'])) {
+        \$cf_error = 'http:' . \$http . ' err:' . json_encode(\$res['errors'] ?? []);
+        if (\$attempt < \$_max_retry) { sleep(\$_retry_delay); continue; }
+        break;
+    }
+    \$zone_id   = \$res['result'][0]['id']   ?? '';
+    \$zone_name = \$res['result'][0]['name'] ?? \$cur_name;
+    if (\$zone_id) break;
+    \$cf_error = 'zone_empty';
+    if (\$attempt < \$_max_retry) sleep(\$_retry_delay);
+}
 
-            if ($curl_err) {
-                $cf_error = "curl:" . $curl_err;
-                if ($attempt < $max_retry) { sleep($retry_delay); continue; }
-                break;
-            }
-            $res = json_decode($raw, true);
-            if ($http !== 200 || empty($res["success"])) {
-                $cf_error = "http:" . $http . " err:" . json_encode($res["errors"] ?? []);
-                if ($attempt < $max_retry) { sleep($retry_delay); continue; }
-                break;
-            }
-            $zone_id   = $res["result"][0]["id"]   ?? "";
-            $zone_name = $res["result"][0]["name"] ?? $cur_name;
-            if ($zone_id) break;
-            $cf_error = "zone_empty";
-            if ($attempt < $max_retry) sleep($retry_delay);
-        }
+// ── 8. บันทึก Zone ID ──────────────────────────────────────────
+if (\$zone_id) {
+    update_option('litespeed.conf.cdn-cloudflare_zone', \$zone_id);
+    update_option('litespeed.conf.cdn-cloudflare_name', \$zone_name);
+}
 
-        // ── 8. บันทึก Zone ID ลง DB ──────────────────────────
-        if ($zone_id) {
-            update_option("litespeed.conf.cdn-cloudflare_zone", $zone_id);
-            update_option("litespeed.conf.cdn-cloudflare_name", $zone_name);
-        }
+// ── 9. Verify ───────────────────────────────────────────────────
+\$v_key   = trim((string) get_option('litespeed.conf.cdn-cloudflare_key',   ''));
+\$v_zone  = trim((string) get_option('litespeed.conf.cdn-cloudflare_zone',  ''));
+\$v_email = trim((string) get_option('litespeed.conf.cdn-cloudflare_email', ''));
+\$key_ok  = (\$v_key === \$_new_key) ? 1 : 0;
 
-        // ── 9. Verify ─────────────────────────────────────────
-        $v_key   = trim((string) get_option("litespeed.conf.cdn-cloudflare_key",   ""));
-        $v_zone  = trim((string) get_option("litespeed.conf.cdn-cloudflare_zone",  ""));
-        $v_email = trim((string) get_option("litespeed.conf.cdn-cloudflare_email", ""));
-        $key_ok  = ($v_key === $new_key) ? 1 : 0;
+printf(
+    "STATUS:DONE\tKEY_OK:%d\tDOMAIN:%s\tOLD_KEY:%s\tNEW_KEY:%s\tOLD_EMAIL:%s\tNEW_EMAIL:%s\tOLD_ZONE:%s\tNEW_ZONE:%s\tFIXED:%d\tATTEMPT:%d\tCF_ERROR:%s\tFORCE_OW:%d",
+    \$key_ok,
+    \$zone_name ?: \$cur_name,
+    substr(\$cur_key, 0, 8),
+    substr(\$v_key,   0, 8),
+    \$cur_email,
+    \$v_email,
+    \$cur_zone ? substr(\$cur_zone, 0, 12) . '...' : '(empty)',
+    \$v_zone   ?: '(no zone)',
+    \$was_fixed ? 1 : 0,
+    \$attempt,
+    \$cf_error,
+    \$force_ow
+);
+PHPEOF
 
-        printf(
-            "STATUS:DONE\tKEY_OK:%d\tDOMAIN:%s\tOLD_KEY:%s\tNEW_KEY:%s\tOLD_EMAIL:%s\tNEW_EMAIL:%s\tOLD_ZONE:%s\tNEW_ZONE:%s\tFIXED:%d\tATTEMPT:%d\tCF_ERROR:%s\tFORCE_OW:%d",
-            $key_ok,
-            $zone_name ?: $cur_name,
-            substr($cur_key,  0, 8),
-            substr($v_key,    0, 8),
-            $cur_email,
-            $v_email,
-            $cur_zone ? substr($cur_zone, 0, 12)."..." : "(empty)",
-            $v_zone   ?: "(no zone)",
-            $was_fixed ? 1 : 0,
-            $attempt,
-            $cf_error,
-            $force_ow
-        );
-    ' --allow-root 2>/dev/null)
+    EVAL_OUT=$(timeout "$WP_TIMEOUT" wp --path="$dir" eval-file "$_PHP_FILE" --allow-root 2>/dev/null)
+    rm -f "$_PHP_FILE" 
 
     local STATUS
     STATUS=$(echo "$EVAL_OUT" | grep -oP '(?<=STATUS:)\w+')
