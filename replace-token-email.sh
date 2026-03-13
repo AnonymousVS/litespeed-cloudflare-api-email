@@ -27,6 +27,11 @@ VERSION="v2"
 DOMAIN_CSV_URL="https://raw.githubusercontent.com/AnonymousVS/litespeed-cloudflare-api-email/main/config-domain.csv"
 TOKEN_CSV_URL="https://raw.githubusercontent.com/AnonymousVS/litespeed-cloudflare-api-email/main/config-api-key-token.csv"
 
+# ─── Cache-busting: ต่อ ?t=timestamp ให้ GitHub ส่งไฟล์ล่าสุดทุกครั้ง ─
+_TS="?t=$(date +%s)"
+DOMAIN_CSV_URL="${DOMAIN_CSV_URL}${_TS}"
+TOKEN_CSV_URL="${TOKEN_CSV_URL}${_TS}"
+
 # ─── รับ path จาก argument หรือใช้ default ───────────────────
 DOMAIN_CSV="${1:-/root/config-domain.csv}"
 TOKEN_CSV="${2:-/root/config-api-key-token.csv}"
