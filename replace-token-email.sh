@@ -31,15 +31,18 @@ TOKEN_CSV_URL="https://raw.githubusercontent.com/AnonymousVS/litespeed-cloudflar
 DOMAIN_CSV="${1:-/root/config-domain.csv}"
 TOKEN_CSV="${2:-/root/config-api-key-token.csv}"
 
-# ─── ดาวน์โหลด CSV ถ้ายังไม่มี ──────────────────────────────
+# ─── ดาวน์โหลด CSV จาก GitHub ทุกครั้ง (ให้ได้ค่าล่าสุด) ────
 download_csv() {
     local file="$1" url="$2" label="$3"
-    if [[ ! -f "$file" ]]; then
-        echo "📥 ดาวน์โหลด $label จาก GitHub..."
-        if ! curl -fsSL "$url" -o "$file"; then
-            echo "❌ ERROR: ดาวน์โหลด $label ไม่สำเร็จ"
+    echo "📥 ดาวน์โหลด $label จาก GitHub..."
+    if ! curl -fsSL "$url" -o "$file"; then
+        if [[ -f "$file" ]]; then
+            echo "⚠️  ดาวน์โหลดไม่ได้ — ใช้ไฟล์ local เดิม: $file"
+        else
+            echo "❌ ERROR: ดาวน์โหลด $label ไม่สำเร็จ และไม่มีไฟล์ local"
             exit 1
         fi
+    else
         echo "✅ → $file"
     fi
 }
@@ -60,11 +63,11 @@ declare -a DOMAIN_LIST=()
 
 # อ่าน config-api-key-token.csv → EMAIL_TOKEN
 while IFS=',' read -r email token; do
-    # ลบ \r, ลบ whitespace หน้า-หลัง
-    email=$(echo "$email" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    # ลบ \r, ลบ whitespace หน้า-หลัง, lowercase email
+    email=$(echo "$email" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')
     token=$(echo "$token" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     # ข้าม header + บรรทัดว่าง
-    [[ "$email" == "Cloudflare Email" ]] && continue
+    [[ "$email" == "cloudflare email" ]] && continue
     [[ -z "$email" || -z "$token" ]] && continue
     [[ "$token" == "YOUR_API_TOKEN_HERE" ]] && continue
     EMAIL_TOKEN["$email"]="$token"
@@ -73,12 +76,21 @@ done < "$TOKEN_CSV"
 echo "📋 อ่าน API Token : ${#EMAIL_TOKEN[@]} รายการ"
 
 # อ่าน config-domain.csv → DOMAIN_EMAIL + DOMAIN_TOKEN
+DUPLICATE_COUNT=0
 while IFS=',' read -r domain email; do
-    domain=$(echo "$domain" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    email=$(echo "$email"   | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    # ลบ \r, ลบ whitespace หน้า-หลัง, lowercase ทั้ง domain และ email
+    domain=$(echo "$domain" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')
+    email=$(echo "$email"   | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')
     # ข้าม header + บรรทัดว่าง
-    [[ "$domain" == "Domain" ]] && continue
+    [[ "$domain" == "domain" ]] && continue
     [[ -z "$domain" || -z "$email" ]] && continue
+
+    # #6 ตรวจ domain ซ้ำ
+    if [[ -n "${DOMAIN_EMAIL[$domain]+_}" ]]; then
+        echo "⚠️  DUPLICATE: $domain ซ้ำใน CSV (email เดิม: ${DOMAIN_EMAIL[$domain]} → เขียนทับด้วย: $email)"
+        DUPLICATE_COUNT=$(( DUPLICATE_COUNT + 1 ))
+    fi
+
     DOMAIN_EMAIL["$domain"]="$email"
     DOMAIN_LIST+=("$domain")
 
@@ -91,6 +103,7 @@ while IFS=',' read -r domain email; do
 done < "$DOMAIN_CSV"
 
 echo "📋 อ่านโดเมน      : ${#DOMAIN_LIST[@]} รายการ"
+[[ $DUPLICATE_COUNT -gt 0 ]] && echo "⚠️  พบ domain ซ้ำ   : $DUPLICATE_COUNT รายการ (ใช้ค่าแถวสุดท้าย)"
 
 # ─── Validate ────────────────────────────────────────────────
 if [[ ${#DOMAIN_LIST[@]} -eq 0 ]]; then
@@ -98,12 +111,22 @@ if [[ ${#DOMAIN_LIST[@]} -eq 0 ]]; then
     exit 1
 fi
 
-# ตรวจว่ามี token ครบไหม
+# ตรวจว่ามี token ครบไหม + #9 validate token format
 MISSING_TOKEN=0
+BAD_TOKEN=0
 for d in "${DOMAIN_LIST[@]}"; do
-    if [[ -z "${DOMAIN_TOKEN[$d]}" ]]; then
+    local_token="${DOMAIN_TOKEN[$d]}"
+    if [[ -z "$local_token" ]]; then
         echo "⚠️  WARNING: โดเมน $d (email: ${DOMAIN_EMAIL[$d]}) ไม่มี API Token ใน $TOKEN_CSV"
         MISSING_TOKEN=$(( MISSING_TOKEN + 1 ))
+    elif [[ "$local_token" =~ [\'\"\\$\`\;\|] ]]; then
+        # Token มี special chars ที่อาจทำให้ PHP/Bash string พัง
+        echo "❌ BAD TOKEN: โดเมน $d — Token มีอักขระพิเศษ (', \", \\, \$, \`, ;, |) อาจทำให้ script ทำงานผิดพลาด"
+        DOMAIN_TOKEN["$d"]=""   # ล้าง token → จะถูก skip
+        BAD_TOKEN=$(( BAD_TOKEN + 1 ))
+    elif [[ ! "$local_token" =~ ^[a-zA-Z0-9_\-]+$ ]]; then
+        # Token มีอักขระที่ไม่ใช่ alphanumeric/underscore/hyphen
+        echo "⚠️  SUSPECT TOKEN: โดเมน $d — Token มีอักขระที่ไม่ปกติ: ${local_token:0:12}..."
     fi
 done
 
@@ -117,8 +140,10 @@ echo "║"
 echo "║   config-domain.csv       : $DOMAIN_CSV"
 echo "║   config-api-key-token.csv: $TOKEN_CSV"
 echo "║   จำนวนโดเมน              : ${#DOMAIN_LIST[@]}"
-echo "║   มี Token พร้อม          : $(( ${#DOMAIN_LIST[@]} - MISSING_TOKEN ))"
+echo "║   มี Token พร้อม          : $(( ${#DOMAIN_LIST[@]} - MISSING_TOKEN - BAD_TOKEN ))"
 echo "║   ขาด Token               : $MISSING_TOKEN"
+[[ $BAD_TOKEN -gt 0 ]]     && echo "║   ❌ Token ผิดปกติ         : $BAD_TOKEN (ถูก skip)"
+[[ $DUPLICATE_COUNT -gt 0 ]] && echo "║   ⚠️  Domain ซ้ำใน CSV     : $DUPLICATE_COUNT"
 echo "║"
 echo "║   การทำงาน:"
 echo "║     1. ค้นหา WordPress directory ของแต่ละโดเมน"
@@ -144,8 +169,9 @@ echo "║"
 echo "╚══════════════════════════════════════════════════════════════"
 echo ""
 
-if [[ $MISSING_TOKEN -gt 0 ]]; then
-    echo "⚠️  มี $MISSING_TOKEN โดเมนที่ขาด Token — จะถูกข้ามไป"
+if [[ $MISSING_TOKEN -gt 0 || $BAD_TOKEN -gt 0 ]]; then
+    [[ $MISSING_TOKEN -gt 0 ]] && echo "⚠️  มี $MISSING_TOKEN โดเมนที่ขาด Token — จะถูกข้ามไป"
+    [[ $BAD_TOKEN -gt 0 ]]     && echo "❌ มี $BAD_TOKEN โดเมนที่ Token มีอักขระพิเศษ — จะถูกข้ามไป"
     echo ""
 fi
 
@@ -161,6 +187,7 @@ MAX_JOBS=5
 WP_TIMEOUT=30
 MAX_RETRY=3
 RETRY_DELAY=5
+CF_API_DELAY=1          # F1: หน่วง 1 วินาทีระหว่างเว็บ ป้องกัน CF API rate limit (1200 req/5min)
 
 LOG_FILE="/var/log/lscwp-cf-update.log"
 LOG_PASS="/var/log/lscwp-cf-update-pass.log"
@@ -216,8 +243,12 @@ declare -A WP_PATH_MAP
 declare -a ALL_WP_DIRS=()
 declare -A _SEEN
 
+echo -n "🔍 Scanning WordPress installations..."
+
 # แหล่งที่ 1: WHM — /etc/trueuserdomains
 if [[ -f /etc/trueuserdomains ]]; then
+    _user_count=$(wc -l < /etc/trueuserdomains)
+    _user_done=0
     while IFS=' ' read -r _dom _usr _rest; do
         _usr="${_usr%:}"
         [[ -z "$_usr" ]] && continue
@@ -227,17 +258,22 @@ if [[ -f /etc/trueuserdomains ]]; then
             _d="$(dirname "$_wpc")/"
             [[ -z "${_SEEN[$_d]+_}" ]] && { _SEEN[$_d]=1; ALL_WP_DIRS+=("$_d"); }
         done < <(find "$_uhome" -maxdepth 5 -name "wp-config.php" -print0 2>/dev/null)
+        _user_done=$((_user_done + 1))
+        # แสดง progress ทุก 50 users
+        (( _user_done % 50 == 0 )) && echo -n " [${_user_done}/${_user_count} users, ${#ALL_WP_DIRS[@]} WP found]"
     done < /etc/trueuserdomains
 fi
 
 # แหล่งที่ 2: Scan /home*
 for _base in /home /home2 /home3 /home4 /home5 /usr/home; do
     [[ -d "$_base" ]] || continue
+    echo -n " [$_base]"
     while IFS= read -r -d '' _wpc; do
         _d="$(dirname "$_wpc")/"
         [[ -z "${_SEEN[$_d]+_}" ]] && { _SEEN[$_d]=1; ALL_WP_DIRS+=("$_d"); }
     done < <(find "$_base" -maxdepth 5 -name "wp-config.php" -print0 2>/dev/null)
 done
+echo ""  # จบบรรทัด progress
 
 log "พบ WordPress ทั้งหมด : ${#ALL_WP_DIRS[@]} เว็บ"
 
@@ -581,6 +617,9 @@ for domain in "${DOMAIN_LIST[@]}"; do
     fi
 
     FOUND=$(( FOUND + 1 ))
+
+    # F1: หน่วง CF_API_DELAY วินาที ป้องกัน CF API rate limit
+    [[ $FOUND -gt 1 ]] && sleep "$CF_API_DELAY"
 
     # process_domain รับค่าผ่าน function arguments โดยตรง
     process_domain "$domain" "$wp_dir" "$cf_email" "$cf_token" "$COUNT" "$TOTAL" &
