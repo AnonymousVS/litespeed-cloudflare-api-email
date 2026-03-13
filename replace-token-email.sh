@@ -23,9 +23,9 @@
 
 VERSION="v2"
 
-# ─── URL ของ CSV บน GitHub ────────────────────────────────────
-DOMAIN_CSV_URL="https://raw.githubusercontent.com/AnonymousVS/litespeed-cloudflare-api-email/main/config-domain.csv"
-TOKEN_CSV_URL="https://raw.githubusercontent.com/AnonymousVS/litespeed-cloudflare-api-email/main/config-api-key-token.csv"
+# ─── URL ของ CSV บน GitHub (ใช้ refs/heads/main เพื่อลด cache) ──
+DOMAIN_CSV_URL="https://raw.githubusercontent.com/AnonymousVS/litespeed-cloudflare-api-email/refs/heads/main/config-domain.csv"
+TOKEN_CSV_URL="https://raw.githubusercontent.com/AnonymousVS/litespeed-cloudflare-api-email/refs/heads/main/config-api-key-token.csv"
 
 # ─── Cache-busting: ต่อ ?t=timestamp ให้ GitHub ส่งไฟล์ล่าสุดทุกครั้ง ─
 _TS="?t=$(date +%s)"
@@ -36,17 +36,16 @@ TOKEN_CSV_URL="${TOKEN_CSV_URL}${_TS}"
 DOMAIN_CSV="${1:-/root/config-domain.csv}"
 TOKEN_CSV="${2:-/root/config-api-key-token.csv}"
 
+# ─── ลบ CSV local เก่า → บังคับดาวน์โหลดใหม่จาก GitHub ──────
+rm -f "$DOMAIN_CSV" "$TOKEN_CSV"
+
 # ─── ดาวน์โหลด CSV จาก GitHub ทุกครั้ง (ให้ได้ค่าล่าสุด) ────
 download_csv() {
     local file="$1" url="$2" label="$3"
     echo "📥 ดาวน์โหลด $label จาก GitHub..."
     if ! curl -fsSL "$url" -o "$file"; then
-        if [[ -f "$file" ]]; then
-            echo "⚠️  ดาวน์โหลดไม่ได้ — ใช้ไฟล์ local เดิม: $file"
-        else
-            echo "❌ ERROR: ดาวน์โหลด $label ไม่สำเร็จ และไม่มีไฟล์ local"
-            exit 1
-        fi
+        echo "❌ ERROR: ดาวน์โหลด $label ไม่สำเร็จ"
+        exit 1
     else
         echo "✅ → $file"
     fi
