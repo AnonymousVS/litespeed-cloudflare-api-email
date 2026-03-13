@@ -27,7 +27,7 @@ litespeed-cloudflare-api-email/
 > ⚠️ ต้องมี `replace-token-email.conf` อยู่ใน directory ปัจจุบันก่อน
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/AnonymousVS/litespeed-cloudflare-api-email/main/replace-token-email.sh)
+bash <(curl -s "https://raw.githubusercontent.com/AnonymousVS/litespeed-cloudflare-api-email/main/replace-token-email.sh?t=$(date +%s)")
 ```
 
 ---
