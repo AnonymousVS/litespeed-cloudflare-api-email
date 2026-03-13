@@ -54,12 +54,6 @@ seoteam18@gmail.com,3648ec5f900116438e47c4282edd62251e2c3
 bash <(curl -s "https://raw.githubusercontent.com/AnonymousVS/litespeed-cloudflare-api-/main/replace-token-.sh?t=$(date +%s)")
 ```
 
-**หรือรันจากไฟล์ local:**
-
-```bash
-bash replace-token-.sh [config-domain.csv] [config-api-key-token.csv]
-```
-
 > ต้องรันด้วย **root** เพราะใช้ `wp-cli --allow-root`
 
 ### 3. ตรวจสอบผลลัพธ์
