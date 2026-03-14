@@ -51,7 +51,7 @@ seoteam18@gmail.com,3648ec5f900116438e47c4282edd62251e2c3
 **รันจาก GitHub โดยตรง (แนะนำ):**
 
 ```bash
-bash <(curl -s "https://raw.githubusercontent.com/AnonymousVS/litespeed-cloudflare-api-/main/replace-token-.sh?t=$(date +%s)")
+bash <(curl -s "https://raw.githubusercontent.com/AnonymousVS/litespeed-cloudflare-api-email/refs/heads/main/replace-token-email.sh")
 ```
 
 > ต้องรันด้วย **root** เพราะใช้ `wp-cli --allow-root`
