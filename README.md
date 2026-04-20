@@ -16,30 +16,6 @@ curl -s https://raw.githubusercontent.com/AnonymousVS/litespeed-cloudflare-api-e
 bash <(curl -s https://raw.githubusercontent.com/AnonymousVS/litespeed-cloudflare-api-email/main/replace-token-email.sh)
 ```
 
-### วิธี 2: วาง config บน server ครั้งเดียว
-
-```bash
-# ทำครั้งเดียว:
-mkdir -p /usr/local/etc/litespeed-cloudflare/
-# วาง 2 ไฟล์:
-#   /usr/local/etc/litespeed-cloudflare/server-config.conf
-#   /usr/local/etc/litespeed-cloudflare/Cf-Token-Litespeed-Cloudflare-Api-Update.conf
-
-# แล้วรัน:
-bash <(curl -s https://raw.githubusercontent.com/AnonymousVS/litespeed-cloudflare-api-email/main/replace-token-email.sh)
-```
-
-### วิธี 3: ไม่มี config — script จะถาม GitHub PAT
-
-```bash
-bash <(curl -s https://raw.githubusercontent.com/AnonymousVS/litespeed-cloudflare-api-email/main/replace-token-email.sh)
-# → script จะถาม GitHub PAT → ดึง config จาก private repo อัตโนมัติ
-```
-
-> ต้องรันด้วย **root** เพราะใช้ `wp-cli --allow-root`
-
----
-
 ## ไฟล์ในโปรเจค
 
 | ไฟล์ | ตำแหน่ง | คำอธิบาย |
