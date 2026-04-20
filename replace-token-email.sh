@@ -167,6 +167,9 @@ log() {
 }
 
 cleanup() {
+    # หยุด spinner/progress ถ้ายังทำงานอยู่
+    [[ -n "$spinner_pid" ]] && kill "$spinner_pid" 2>/dev/null
+    [[ -n "$PROGRESS_PID" ]] && kill "$PROGRESS_PID" 2>/dev/null
     wait
     rm -rf "$RESULT_DIR"
     rm -f "$LOCK_FILE" \
@@ -174,6 +177,7 @@ cleanup() {
           "${LOG_FILE}.skip.lock" "${LOG_FILE}.nochange.lock" \
           "${LOG_FILE}.mismatch.lock"
 }
+PROGRESS_PID=""
 trap cleanup EXIT
 
 # ─── ตรวจ WP-CLI ─────────────────────────────────────────────
@@ -206,6 +210,27 @@ log " Telegram     : ${TELEGRAM_BOT_TOKEN:+ON}${TELEGRAM_BOT_TOKEN:-OFF}"
 log " Jobs         : $MAX_JOBS"
 log "======================================"
 
+# ─── Spinner ──────────────────────────────────────────────────
+SPINNER_CHARS='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+spinner_pid=""
+start_spinner() {
+    local msg="$1"
+    (
+        local i=0
+        while true; do
+            printf "\r  %s %s " "${SPINNER_CHARS:i%${#SPINNER_CHARS}:1}" "$msg"
+            i=$((i+1))
+            sleep 0.1
+        done
+    ) &
+    spinner_pid=$!
+}
+stop_spinner() {
+    [[ -n "$spinner_pid" ]] && kill "$spinner_pid" 2>/dev/null && wait "$spinner_pid" 2>/dev/null
+    spinner_pid=""
+    printf "\r\033[K"
+}
+
 # ─── ค้นหา WordPress ─────────────────────────────────────────
 # CPANEL_USERS ว่าง = scan ทุก user
 # CPANEL_USERS ระบุ = scan เฉพาะ user ที่กำหนด
@@ -215,6 +240,7 @@ DIRS=()
 if [[ -n "$CPANEL_USERS" ]]; then
     # ─── Scan เฉพาะ user ที่ระบุ ──────────────────────────────
     log "🔍 Scan เฉพาะ: $CPANEL_USERS"
+    start_spinner "Scanning WordPress installations..."
     for _usr in $CPANEL_USERS; do
         _uhome=$(getent passwd "$_usr" 2>/dev/null | cut -d: -f6)
         if [[ ! -d "$_uhome" ]]; then
@@ -228,6 +254,7 @@ if [[ -n "$CPANEL_USERS" ]]; then
     done
 else
     # ─── Scan ทุก user ────────────────────────────────────────
+    start_spinner "Scanning WordPress installations..."
     if [[ -f /etc/trueuserdomains ]]; then
         while IFS=' ' read -r _dom _usr _rest; do
             _usr="${_usr%:}"
@@ -249,6 +276,7 @@ else
         done < <(find "$_base" -maxdepth 5 -name "wp-config.php" -print0 2>/dev/null)
     done
 fi
+stop_spinner
 
 TOTAL=${#DIRS[@]}
 log "พบ WordPress  : $TOTAL เว็บ"
@@ -476,9 +504,23 @@ export -f process_site
 export LOG_FILE LOCK_FILE LOG_PASS LOG_FAIL LOG_SKIP LOG_NOCHANGE LOG_MISMATCH RESULT_DIR
 export WP_TIMEOUT MAX_RETRY RETRY_DELAY CF_TOKEN CF_EMAIL CF_ONLY_ACTIVE CF_OVERWRITE_KEY CPANEL_USERS
 
-# ─── รัน parallel ────────────────────────────────────────────
+# ─── รัน parallel + progress ─────────────────────────────────
 declare -a PIDS=()
 COUNT=0
+
+# Progress spinner (background)
+(
+    i=0
+    while true; do
+        _done=$(find "$RESULT_DIR" -maxdepth 1 -name "pass_*" -o -name "fail_*" -o -name "skip_*" -o -name "nochange_*" 2>/dev/null | wc -l)
+        printf "\r  %s ประมวลผล [%d/%d เว็บ]  " "${SPINNER_CHARS:i%${#SPINNER_CHARS}:1}" "$_done" "$TOTAL"
+        i=$((i+1))
+        sleep 0.3
+        [[ "$_done" -ge "$TOTAL" ]] && break
+    done
+) &
+PROGRESS_PID=$!
+
 for dir in "${DIRS[@]}"; do
     COUNT=$(( COUNT + 1 ))
     process_site "$dir" "$COUNT" "$TOTAL" &
@@ -489,6 +531,10 @@ for dir in "${DIRS[@]}"; do
     fi
 done
 for pid in "${PIDS[@]}"; do wait "$pid"; done
+
+kill "$PROGRESS_PID" 2>/dev/null && wait "$PROGRESS_PID" 2>/dev/null
+printf "\r\033[K"
+log "✅ ประมวลผลเสร็จ $TOTAL เว็บ"
 
 # ─── สรุป ────────────────────────────────────────────────────
 END_TIME=$(date +%s)
