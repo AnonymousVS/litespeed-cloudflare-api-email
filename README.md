@@ -2,6 +2,10 @@
 
 Bash script สำหรับอัปเดต **Cloudflare API Token** ให้กับ WordPress ทุกเว็บบนเซิร์ฟเวอร์ ผ่าน **LiteSpeed Cache Plugin → CDN → Cloudflare** รองรับหลาย Cloudflare Account (คนละ email คนละ token)
 
+
+
+
+
 ## คำสั่งรัน
 ```bash
 https://drive.google.com/file/d/1nNZx0-evfkHVvaXNTgBdoB4gtI3_dUiw/view?usp=drive_link
@@ -80,28 +84,28 @@ CF_OVERWRITE_KEY="yes"
 
 ---
 
-## Flow การทำงาน
+## ขั้นตอนการทำงาน
 
-```
-1. โหลด server-config.conf → CPANEL_USERS, Telegram
-2. โหลด domains.csv → domain + cf_email mapping
-3. โหลด CF Token config → email + token mapping
-4. Validate: ทุก token ต้องเป็น cfut_
-5. Scan WordPress ตาม CPANEL_USERS
-6. Filter ตาม domains.csv (ถ้ามี)
-7. ทุก domain:
-   → หา email จาก domains.csv
-   → หา token จาก CF_TOKENS[email]
-   → ใส่ token + email ลง LiteSpeed CDN
-   → ดึง Zone ID ด้วย Bearer token ที่ถูก account
-   → Verify ผลลัพธ์
-8. สรุปผล + Telegram notification
-```
+Script ทำงานต่อเว็บ ด้วย `wp litespeed-option set` + `bash curl`:
+
+| Step | ทำอะไร | คำสั่ง |
+|------|--------|--------|
+| 1 | ตรวจ LiteSpeed Cache Plugin | `wp plugin is-active litespeed-cache` |
+| 2 | อ่าน options ปัจจุบัน | `wp option get litespeed.conf.cdn-cloudflare_*` |
+| 3 | เช็ค CF_ONLY_ACTIVE | bash `[[ ]]` |
+| 4 | เช็ค CF_OVERWRITE_KEY | bash `[[ ]]` |
+| 5 | Auto-fix domain จาก folder | bash `basename` |
+| 6 | เขียน Credentials | `wp litespeed-option set cdn-cloudflare_key "$TOKEN"` |
+| 7 | ดึง Zone ID | bash `curl -H "Authorization: Bearer $TOKEN"` |
+| 8 | บันทึก Zone ID | `wp eval "update_option(...)"` |
+| 9 | Verify ผลลัพธ์ | `wp option get litespeed.conf.cdn-cloudflare_*` |
+| 10 | Log ผลลัพธ์ | pass / fail / skip / nochange |
 
 ## Features
 
-- **Multi-token**: แต่ละ CF account มี token ของตัวเอง — รันครั้งเดียวจบ
-- **WordPress API Token (cfut_)** เท่านั้น
+- **litespeed-option set** — เขียน credentials ผ่าน LiteSpeed WP-CLI (ไม่มี quoting bug)
+- **Multi-token** — แต่ละ CF account มี token ของตัวเอง (รันครั้งเดียวจบ)
+- **WordPress API Token (cfut_)** เท่านั้น — ปลอดภัยกว่า Global Key
 - **CF Token แยก private repo** — ไม่ถูก revoke
 - **domains.csv** — ระบุ domain + email เฉพาะ
 - **Backward compatible** — CF_TOKEN เดียวยังใช้ได้
@@ -110,7 +114,7 @@ CF_OVERWRITE_KEY="yes"
 - **Telegram notification** สรุปผล
 - **Spinner** แสดง progress
 - รัน **parallel** สูงสุด 5 เว็บพร้อมกัน
-- **Log แยกตามสถานะ**
+- **Log แยกตามสถานะ** (pass/fail/skip/nochange)
 
 ## สถานะผลลัพธ์
 
@@ -125,8 +129,11 @@ CF_OVERWRITE_KEY="yes"
 
 ## Changelog
 
-### v3.1 (2026-04-21) — ปัจจุบัน
+### v4 (2026-04-27) — ปัจจุบัน
 
+- Rewrite: ใช้ `litespeed-option set` แทน `wp eval` (เหมือน website-daily-create.sh)
+- Fix: bash variable quoting bug 6 จุด
+- Fix: Telegram แสดง token ในจอ
 - Multi-token: CF_TOKENS["email"]="cfut_token" (หลาย account)
 - domains.csv: domain + cf_email mapping
 - Per-domain token: ดึง Zone ID ด้วย token ที่ถูก account
