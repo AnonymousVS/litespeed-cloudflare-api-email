@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================
-#  replace-token-email.sh v4.3
+#  replace-token-email.sh v4.4
 #  Bulk Update Cloudflare API Token
 #  LiteSpeed Cache › CDN › Cloudflare
 # ============================================================
@@ -28,6 +28,8 @@
 #   bash <(curl -s https://raw.githubusercontent.com/AnonymousVS/Litespeed-Cloudflare-Api-Update/main/replace-token-email.sh)
 # =============================================================
 # CHANGELOG:
+# v4.4 (2026-04-27)
+#   - เพิ่ม Purge Cloudflare cache หลังใส่ Token + Zone ID
 # v4.3 (2026-04-27)
 #   - Fix: spinner ไม่เว้นบรรทัดก่อนแสดงผล (clear line ก่อน log)
 # v4.2 (2026-04-27)
@@ -55,7 +57,7 @@
 #   - Single config file, auto-detect จาก CF_EMAIL
 # =============================================================
 
-VERSION="v4.3"
+VERSION="v4.4"
 PRIVATE_REPO="AnonymousVS/config"
 PUBLIC_REPO="AnonymousVS/Litespeed-Cloudflare-Api-Update"
 CF_TOKEN_FILE="Litespeed-Cloudflare-Api-Update.conf"
@@ -500,6 +502,12 @@ process_site() {
     if [[ -n "$zone_id" ]]; then
         wp --path="$dir" option update litespeed.conf.cdn-cloudflare_zone "$zone_id" --allow-root >/dev/null 2>&1
         wp --path="$dir" option update litespeed.conf.cdn-cloudflare_name "$zone_name" --allow-root >/dev/null 2>&1
+
+        # ── 8.5 Purge Cloudflare cache ────────────────────────
+        curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${zone_id}/purge_cache" \
+            -H "Authorization: Bearer $SITE_CF_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"purge_everything":true}' >/dev/null 2>&1
     fi
 
     # ── 9. Verify ─────────────────────────────────────────────
