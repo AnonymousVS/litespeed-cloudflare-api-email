@@ -481,11 +481,9 @@ process_site() {
         [[ $attempt -lt $MAX_RETRY ]] && sleep "$RETRY_DELAY"
     done
 
-    # ── 8. บันทึก Zone ID ─────────────────────────────────────
+    # ── 8. บันทึก Zone ID (litespeed-option set เหมือน Step 6) ─
     if [[ -n "$zone_id" ]]; then
-        wp --path="$dir" eval \
-            "update_option('litespeed.conf.cdn-cloudflare_zone', '$zone_id');" \
-            --allow-root >/dev/null 2>&1
+        wp --path="$dir" litespeed-option set cdn-cloudflare_zone "$zone_id" --allow-root >/dev/null 2>&1
         wp --path="$dir" litespeed-option set cdn-cloudflare_name "$zone_name" --allow-root >/dev/null 2>&1
     fi
 
