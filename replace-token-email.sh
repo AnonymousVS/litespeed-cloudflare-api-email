@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================
-#  replace-token-email.sh v4.1
+#  replace-token-email.sh v4.2
 #  Bulk Update Cloudflare API Token
 #  LiteSpeed Cache › CDN › Cloudflare
 # ============================================================
@@ -28,6 +28,8 @@
 #   bash <(curl -s https://raw.githubusercontent.com/AnonymousVS/Litespeed-Cloudflare-Api-Update/main/replace-token-email.sh)
 # =============================================================
 # CHANGELOG:
+# v4.2 (2026-04-27)
+#   - ปรับ output สั้นลง: cpanel_user | domain | zone 5 ตัว
 # v4.1 (2026-04-27)
 #   - Fix: Zone ID ใช้ wp option update (bypass LiteSpeed hooks ที่ reset zone)
 #   - Fix: curl ใช้ pipe ตรง (ไม่แยก http_code — เหมือน website-daily-create.sh)
@@ -51,7 +53,7 @@
 #   - Single config file, auto-detect จาก CF_EMAIL
 # =============================================================
 
-VERSION="v4.1"
+VERSION="v4.2"
 PRIVATE_REPO="AnonymousVS/config"
 PUBLIC_REPO="AnonymousVS/Litespeed-Cloudflare-Api-Update"
 CF_TOKEN_FILE="Litespeed-Cloudflare-Api-Update.conf"
@@ -386,10 +388,13 @@ process_site() {
     local TOTAL="$3"
     local SITE_CF_EMAIL="$4"
     local SITE_CF_TOKEN="$5"
-    local SITE UNIQ
-    SITE=$(echo "$dir" | sed 's|/home[0-9]*/||;s|/$||')
+    local SITE UNIQ CPUSER_NAME DOMAIN_NAME
+    CPUSER_NAME=$(echo "$dir" | sed 's|/home[0-9]*/||;s|/.*||')
+    DOMAIN_NAME=$(basename "${dir%/}")
+    [[ "$DOMAIN_NAME" == "public_html" ]] && DOMAIN_NAME=$(basename "$(dirname "${dir%/}")")
+    SITE="$CPUSER_NAME/$DOMAIN_NAME"
     UNIQ="${BASHPID}_$(date +%s%N)"
-    local LABEL="[$COUNT/$TOTAL] $SITE"
+    local LABEL="[$COUNT/$TOTAL] $CPUSER_NAME | $DOMAIN_NAME"
 
     if [[ "$dir" =~ /public_html/$ ]]; then
         return
@@ -413,7 +418,7 @@ process_site() {
 
     # ── 1. Plugin active? ─────────────────────────────────────
     if ! wp --path="$dir" plugin is-active litespeed-cache --allow-root 2>/dev/null; then
-        _log  "⏭  SKIP (LiteSpeed Cache ไม่ active): $LABEL"
+        _log  "⏭  $LABEL | LiteSpeed ไม่ active"
         _log_r skip "$SITE | plugin ไม่ active"
         touch "${RESULT_DIR}/skip_${UNIQ}"
         return
@@ -429,7 +434,7 @@ process_site() {
 
     # ── 3. CF_ONLY_ACTIVE: ข้ามถ้า CF ปิดอยู่ ────────────────
     if [[ "$CF_ONLY_ACTIVE" == "yes" && ( -z "$cur_enabled" || "$cur_enabled" == "0" ) ]]; then
-        _log  "🔴 SKIP (CF ปิดอยู่): $LABEL"
+        _log  "🔴 $LABEL | CF ปิดอยู่ — ข้าม"
         _log_r skip "$SITE | Cloudflare=OFF ใน plugin — ข้ามตาม CF_ONLY_ACTIVE=yes"
         touch "${RESULT_DIR}/skip_${UNIQ}"
         return
@@ -437,8 +442,8 @@ process_site() {
 
     # ── 4. CF_OVERWRITE_KEY: ข้ามถ้ามี key อยู่แล้ว ──────────
     if [[ "$CF_OVERWRITE_KEY" != "yes" && -n "$cur_key" ]]; then
-        _log  "⏩ NOCHANGE: $LABEL | domain=$cur_name | มี key อยู่แล้ว (${cur_key:0:8}...) ข้ามไป"
-        _log_r nochange "$SITE | domain=$cur_name | existing_key=${cur_key:0:8}..."
+        _log  "⏩ $LABEL | มี key อยู่แล้ว — ข้าม"
+        _log_r nochange "$SITE | existing_key=${cur_key:0:8}..."
         touch "${RESULT_DIR}/nochange_${UNIQ}"
         return
     fi
@@ -505,28 +510,30 @@ process_site() {
     local FIX_TAG=""
     [[ "$was_fixed" == "1" ]] && FIX_TAG=" | ⚙️ domain ถูกแก้อัตโนมัติ"
 
-    local OLD_ZONE_DISPLAY="${cur_zone:0:12}"
+    local OLD_ZONE_DISPLAY="${cur_zone:0:5}"
     [[ -z "$OLD_ZONE_DISPLAY" ]] && OLD_ZONE_DISPLAY="(empty)"
-    local NEW_ZONE_DISPLAY="$v_zone"
+    [[ -n "$cur_zone" ]] && OLD_ZONE_DISPLAY="${OLD_ZONE_DISPLAY}..."
+    local NEW_ZONE_DISPLAY="${v_zone:0:5}"
     [[ -z "$NEW_ZONE_DISPLAY" ]] && NEW_ZONE_DISPLAY="(no zone)"
+    [[ -n "$v_zone" ]] && NEW_ZONE_DISPLAY="${NEW_ZONE_DISPLAY}..."
 
     if [[ "$key_ok" == "1" && -n "$v_zone" ]]; then
-        _log  "✅ PASS: $LABEL | domain=$DOMAIN | key: ${cur_key:0:8}... → ${v_key:0:8}... | zone: $OLD_ZONE_DISPLAY → $NEW_ZONE_DISPLAY | attempt=${attempt}/${MAX_RETRY}${FIX_TAG}"
-        _log_r pass "$SITE | domain=$DOMAIN | old_key=${cur_key:0:8}... | new_key=${v_key:0:8}... | old_email=$cur_email | new_email=$v_email | zone: $OLD_ZONE_DISPLAY → $NEW_ZONE_DISPLAY | attempt=${attempt}/${MAX_RETRY}${FIX_TAG}"
+        _log  "✅ $LABEL | zone: $OLD_ZONE_DISPLAY → $NEW_ZONE_DISPLAY${FIX_TAG}"
+        _log_r pass "$SITE | zone: $cur_zone | key: ${v_key:0:12}... | email: $v_email | attempt=${attempt}/${MAX_RETRY}${FIX_TAG}"
         [[ "$was_fixed" == "1" ]] && _log_r mismatch "$SITE | domain ถูกแก้อัตโนมัติ → $DOMAIN"
         touch "${RESULT_DIR}/pass_${UNIQ}"
         [[ "$was_fixed" == "1" ]] && touch "${RESULT_DIR}/mismatch_${UNIQ}"
     elif [[ "$key_ok" == "1" && "$cf_error" == "zone_empty" ]]; then
-        _log  "🌐 NOTCF: $LABEL | domain=$DOMAIN | domain ไม่อยู่ใน CF account${FIX_TAG}"
-        _log_r fail "$SITE | domain=$DOMAIN | key อัปเดตแล้ว แต่ domain ไม่อยู่ใน CF | attempt=${attempt}/${MAX_RETRY}${FIX_TAG}"
+        _log  "🌐 $LABEL | domain ไม่อยู่ใน CF account${FIX_TAG}"
+        _log_r fail "$SITE | domain ไม่อยู่ใน CF | attempt=${attempt}/${MAX_RETRY}${FIX_TAG}"
         touch "${RESULT_DIR}/fail_${UNIQ}"
     elif [[ "$key_ok" == "1" ]]; then
-        _log  "❌ FAIL (CF API error): $LABEL | domain=$DOMAIN | error=$cf_error | attempt=${attempt}/${MAX_RETRY}${FIX_TAG}"
-        _log_r fail "$SITE | domain=$DOMAIN | key อัปเดตแล้ว แต่ดึง zone ไม่ได้ | error=$cf_error | attempt=${attempt}/${MAX_RETRY}${FIX_TAG}"
+        _log  "❌ $LABEL | CF API error=$cf_error | attempt=${attempt}/${MAX_RETRY}${FIX_TAG}"
+        _log_r fail "$SITE | CF API error=$cf_error | attempt=${attempt}/${MAX_RETRY}${FIX_TAG}"
         touch "${RESULT_DIR}/fail_${UNIQ}"
     else
-        _log  "❌ FAIL (verify key ไม่ผ่าน): $LABEL | domain=$DOMAIN${FIX_TAG}"
-        _log_r fail "$SITE | domain=$DOMAIN | verify failed — key ไม่ตรง${FIX_TAG}"
+        _log  "❌ $LABEL | verify key ไม่ผ่าน${FIX_TAG}"
+        _log_r fail "$SITE | verify failed — key ไม่ตรง${FIX_TAG}"
         touch "${RESULT_DIR}/fail_${UNIQ}"
     fi
 }
