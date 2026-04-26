@@ -451,12 +451,12 @@ process_site() {
     [[ -z "$DOMAIN" ]] && DOMAIN="$folder_name"
 
     # ── 6. เขียน Credentials (litespeed-option set) ──────────
-    wp --path="$dir" litespeed-option set cdn-cloudflare 1 --allow-root 2>/dev/null
-    wp --path="$dir" litespeed-option set cdn-cloudflare_key "$SITE_CF_TOKEN" --allow-root 2>/dev/null
-    wp --path="$dir" litespeed-option set cdn-cloudflare_email "$SITE_CF_EMAIL" --allow-root 2>/dev/null
-    wp --path="$dir" litespeed-option set cdn-cloudflare_name "$DOMAIN" --allow-root 2>/dev/null
-    wp --path="$dir" litespeed-option set cdn-cloudflare_clear 1 --allow-root 2>/dev/null
-    wp --path="$dir" litespeed-option set cdn 1 --allow-root 2>/dev/null
+    wp --path="$dir" litespeed-option set cdn-cloudflare 1 --allow-root >/dev/null 2>&1
+    wp --path="$dir" litespeed-option set cdn-cloudflare_key "$SITE_CF_TOKEN" --allow-root >/dev/null 2>&1
+    wp --path="$dir" litespeed-option set cdn-cloudflare_email "" --allow-root >/dev/null 2>&1
+    wp --path="$dir" litespeed-option set cdn-cloudflare_name "$DOMAIN" --allow-root >/dev/null 2>&1
+    wp --path="$dir" litespeed-option set cdn-cloudflare_clear 1 --allow-root >/dev/null 2>&1
+    wp --path="$dir" litespeed-option set cdn 1 --allow-root >/dev/null 2>&1
 
     # ── 7. ดึง Zone ID จาก Cloudflare API (bash curl) ────────
     local zone_id="" zone_name="" cf_error="" attempt=0
@@ -495,8 +495,8 @@ process_site() {
     if [[ -n "$zone_id" ]]; then
         wp --path="$dir" eval \
             "update_option('litespeed.conf.cdn-cloudflare_zone', '$zone_id');" \
-            --allow-root 2>/dev/null
-        wp --path="$dir" litespeed-option set cdn-cloudflare_name "$zone_name" --allow-root 2>/dev/null
+            --allow-root >/dev/null 2>&1
+        wp --path="$dir" litespeed-option set cdn-cloudflare_name "$zone_name" --allow-root >/dev/null 2>&1
     fi
 
     # ── 9. Verify ─────────────────────────────────────────────
@@ -589,7 +589,9 @@ for pid in "${PIDS[@]}"; do wait "$pid"; done
 
 kill "$PROGRESS_PID" 2>/dev/null && wait "$PROGRESS_PID" 2>/dev/null
 printf "\r\033[K"
-log "✅ ประมวลผลเสร็จ $TOTAL เว็บ"
+echo ""
+log "──────────────────────────────────────"
+log "  ประมวลผลครบ $TOTAL เว็บ"
 
 # ─── สรุป ────────────────────────────────────────────────────
 END_TIME=$(date +%s)
@@ -622,22 +624,26 @@ log "======================================"
 # ─── Telegram Notification ───────────────────────────────────
 if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
     HOSTNAME=$(hostname)
-    TG_MSG="🔄 *CF Token Update — $HOSTNAME*
-━━━━━━━━━━━━━━━━━
+    TG_MSG="🔄 <b>CF Token Update — $HOSTNAME</b>
+
 ✅ Pass: $SUCCESS
 ⏩ Nochange: $NOCHANGE
 ❌ Fail: $FAILED
 ⏭ Skip: $SKIPPED
 ⚙️ Auto-fixed: $MISMATCH
-━━━━━━━━━━━━━━━━━
+
 ⏱ $(( ELAPSED / 60 ))m $(( ELAPSED % 60 ))s"
 
-    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    TG_RESULT=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         -d chat_id="$TELEGRAM_CHAT_ID" \
         -d text="$TG_MSG" \
-        -d parse_mode="Markdown" >/dev/null 2>&1 \
-        && log "📨 Telegram notification sent" \
-        || log "⚠️  Telegram notification failed"
+        -d parse_mode="HTML" 2>&1)
+
+    if echo "$TG_RESULT" | grep -q '"ok":true'; then
+        log "📨 Telegram notification sent"
+    else
+        log "⚠️  Telegram notification failed: $(echo "$TG_RESULT" | grep -o '"description":"[^"]*"' | head -1)"
+    fi
 fi
 
 exit 0
