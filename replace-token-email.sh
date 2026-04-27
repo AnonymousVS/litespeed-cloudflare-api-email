@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================
-#  replace-token-email.sh v4.5
+#  replace-token-email.sh v4.7
 #  Bulk Update Cloudflare API Token
 #  LiteSpeed Cache › CDN › Cloudflare
 # ============================================================
@@ -28,8 +28,20 @@
 #   bash <(curl -s https://raw.githubusercontent.com/AnonymousVS/Litespeed-Cloudflare-Api-Update/main/replace-token-email.sh)
 # =============================================================
 # CHANGELOG:
+# v4.7 (2026-04-27)
+#   - Parked domain: detect จาก /etc/userdatadomains (แสดง main domain + cpanel user)
+#   - Not on server: detect domain ที่ไม่อยู่บน server → log error
+#   - Telegram: แจ้ง parked count + not-on-server list
+# v4.6 (2026-04-27)
+#   - เพิ่ม Parked/Alias domain support: detect จาก domains.csv + purge CF cache
 # v4.5 (2026-04-27)
 #   - Purge CF cache: แสดง purge สำเร็จ/ไม่สำเร็จ + log ชื่อเว็บที่ fail
+# v4.7 (2026-04-27)
+#   - Parked domain: detect จาก /etc/userdatadomains (แสดง main domain + cpanel user)
+#   - Not on server: detect domain ที่ไม่อยู่บน server → log error
+#   - Telegram: แจ้ง parked count + not-on-server list
+# v4.6 (2026-04-27)
+#   - เพิ่ม Parked/Alias domain support: detect จาก domains.csv + purge CF cache
 # v4.5 (2026-04-27)
 #   - Purge CF: แจ้ง pass/fail count + ชื่อเว็บที่ purge fail ใน Telegram
 # v4.4 (2026-04-27)
@@ -61,7 +73,7 @@
 #   - Single config file, auto-detect จาก CF_EMAIL
 # =============================================================
 
-VERSION="v4.5"
+VERSION="v4.7"
 PRIVATE_REPO="AnonymousVS/config"
 PUBLIC_REPO="AnonymousVS/Litespeed-Cloudflare-Api-Update"
 CF_TOKEN_FILE="Litespeed-Cloudflare-Api-Update.conf"
@@ -369,6 +381,11 @@ fi
 stop_spinner
 
 # ─── Filter ตาม domains.csv (ถ้ามี) ─────────────────────────
+declare -A MATCHED_DOMAINS
+declare -A PARKED_INFO
+PARKED_DOMAINS=()
+NOT_ON_SERVER=()
+
 if [[ $TARGET_DOMAIN_COUNT -gt 0 ]]; then
     FILTERED_DIRS=()
     for dir in "${DIRS[@]}"; do
@@ -379,9 +396,35 @@ if [[ $TARGET_DOMAIN_COUNT -gt 0 ]]; then
         _folder=$(echo "$_folder" | tr '[:upper:]' '[:lower:]')
         if [[ -n "${TARGET_DOMAINS[$_folder]+_}" ]]; then
             FILTERED_DIRS+=("$dir")
+            MATCHED_DOMAINS["$_folder"]=1
         fi
     done
+
+    # domain ที่ไม่เจอ WP folder → เช็ค /etc/userdatadomains
+    for _dom in "${!TARGET_DOMAINS[@]}"; do
+        if [[ -z "${MATCHED_DOMAINS[$_dom]+_}" ]]; then
+            _udd_line=$(grep "^${_dom}:" /etc/userdatadomains 2>/dev/null)
+            if [[ -n "$_udd_line" ]]; then
+                _udd_type=$(echo "$_udd_line" | awk -F'==' '{print $3}')
+                _udd_main=$(echo "$_udd_line" | awk -F'==' '{print $4}')
+                _udd_user=$(echo "$_udd_line" | cut -d: -f2 | awk -F'==' '{print $1}' | tr -d ' ')
+                if [[ "$_udd_type" == "parked" ]]; then
+                    PARKED_DOMAINS+=("$_dom")
+                    PARKED_INFO["$_dom"]="${_udd_main}|${_udd_user}"
+                else
+                    # addon/sub แต่ไม่มี WP → ยังอยู่บน server
+                    PARKED_DOMAINS+=("$_dom")
+                    PARKED_INFO["$_dom"]="${_udd_main}|${_udd_user}|${_udd_type}"
+                fi
+            else
+                NOT_ON_SERVER+=("$_dom")
+            fi
+        fi
+    done
+
     log "🎯 Filter domains.csv: ${#DIRS[@]} → ${#FILTERED_DIRS[@]} เว็บ"
+    [[ ${#PARKED_DOMAINS[@]} -gt 0 ]] && log "🔗 Parked/Alias (purge only): ${#PARKED_DOMAINS[@]} เว็บ"
+    [[ ${#NOT_ON_SERVER[@]} -gt 0 ]] && log "⚠️  ไม่อยู่บน server: ${#NOT_ON_SERVER[@]} เว็บ"
     DIRS=("${FILTERED_DIRS[@]}")
 fi
 
@@ -623,6 +666,82 @@ echo ""
 log "──────────────────────────────────────"
 log "  ประมวลผลครบ $TOTAL เว็บ"
 
+# ─── Parked/Alias domains: Purge CF cache only ──────────────
+if [[ ${#PARKED_DOMAINS[@]} -gt 0 ]]; then
+    echo ""
+    log "======================================"
+    log "  🔗 Parked/Alias Domains — Purge CF cache only"
+    log "======================================"
+    P_COUNT=0
+    P_TOTAL=${#PARKED_DOMAINS[@]}
+
+    for _pd in "${PARKED_DOMAINS[@]}"; do
+        P_COUNT=$((P_COUNT+1))
+
+        # ดึง main domain + cpanel user
+        _pd_info="${PARKED_INFO[$_pd]:-}"
+        _pd_main=$(echo "$_pd_info" | cut -d'|' -f1)
+        _pd_user=$(echo "$_pd_info" | cut -d'|' -f2)
+
+        # หา email + token
+        _pd_email="${DOMAIN_CF_EMAIL[$_pd]:-}"
+        _pd_token=""
+        if [[ -n "$_pd_email" && -n "${CF_TOKENS[$_pd_email]+_}" ]]; then
+            _pd_token="${CF_TOKENS[$_pd_email]}"
+        elif [[ -n "${CF_TOKENS[_default]+_}" ]]; then
+            _pd_token="${CF_TOKENS[_default]}"
+        fi
+
+        if [[ -z "$_pd_token" ]]; then
+            log "  ⚠️ [$P_COUNT/$P_TOTAL] $_pd → ไม่มี token — ข้าม"
+            continue
+        fi
+
+        # ดึง Zone ID
+        _pd_zone=""
+        _pd_zone=$(curl -s "https://api.cloudflare.com/client/v4/zones?name=$_pd" \
+            -H "Authorization: Bearer $_pd_token" \
+            -H "Content-Type: application/json" 2>/dev/null \
+            | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+        if [[ -z "$_pd_zone" ]]; then
+            log "  ❌ [$P_COUNT/$P_TOTAL] $_pd → parked ของ $_pd_main ($_pd_user) | Zone ID ไม่เจอ"
+            echo "$_pd" > "${RESULT_DIR}/purge_fail_parked_${P_COUNT}"
+            continue
+        fi
+
+        # Purge CF cache
+        _pd_purge=""
+        _pd_purge=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${_pd_zone}/purge_cache" \
+            -H "Authorization: Bearer $_pd_token" \
+            -H "Content-Type: application/json" \
+            -d '{"purge_everything":true}' 2>/dev/null)
+
+        if echo "$_pd_purge" | grep -q '"success":true'; then
+            log "  ✅ [$P_COUNT/$P_TOTAL] $_pd → $_pd_main ($_pd_user) | zone: ${_pd_zone:0:5}... | purged"
+            touch "${RESULT_DIR}/purge_pass_parked_${P_COUNT}"
+        else
+            log "  ❌ [$P_COUNT/$P_TOTAL] $_pd → $_pd_main ($_pd_user) | purge failed"
+            echo "$_pd" > "${RESULT_DIR}/purge_fail_parked_${P_COUNT}"
+        fi
+    done
+
+    log "──────────────────────────────────────"
+    log "  Parked purge เสร็จ $P_TOTAL เว็บ"
+fi
+
+# ─── Domain ไม่อยู่บน server ────────────────────────────────
+if [[ ${#NOT_ON_SERVER[@]} -gt 0 ]]; then
+    echo ""
+    log "======================================"
+    log "  ⚠️  Domain ไม่อยู่บน server นี้ ($(hostname))"
+    log "======================================"
+    for _ns in "${NOT_ON_SERVER[@]}"; do
+        log "  ❌ $_ns — ไม่พบใน cPanel บน server นี้"
+        ( flock 202; echo "[$(date '+%Y-%m-%d %H:%M:%S')] NOT_ON_SERVER: $_ns" >> "$LOG_FAIL" ) 202>"${LOG_FILE}.fail.lock"
+    done
+fi
+
 # ─── สรุป ────────────────────────────────────────────────────
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))
@@ -644,10 +763,14 @@ log " สรุปผลรวม  $VERSION"
 log " รวมทั้งหมด      : $TOTAL เว็บ"
 log " ✅ Pass (อัปเดต) : $SUCCESS เว็บ"
 log " 🗑 Purge CF cache : $PURGE_PASS สำเร็จ / $PURGE_FAIL ไม่สำเร็จ"
+log " 🔗 Parked purge  : ${#PARKED_DOMAINS[@]} เว็บ"
 log " ⏩ Nochange       : $NOCHANGE เว็บ  (มี key อยู่แล้ว ข้ามตาม CF_OVERWRITE_KEY=no)"
 log " ❌ Fail          : $FAILED เว็บ"
 log " ⏭  Skip          : $SKIPPED เว็บ  (plugin ไม่ active / CF ปิด)"
 log " ⚙️  Auto-fixed    : $MISMATCH เว็บ  (domain ถูกแก้อัตโนมัติจาก folder name)"
+if [[ ${#NOT_ON_SERVER[@]} -gt 0 ]]; then
+log " ⚠️  ไม่อยู่บน server: ${#NOT_ON_SERVER[@]} เว็บ"
+fi
 log " เวลาที่ใช้       : $(( ELAPSED / 60 )) นาที $(( ELAPSED % 60 )) วินาที"
 if [[ -n "$PURGE_FAIL_LIST" ]]; then
     log " 🗑❌ Purge fail   :"
@@ -669,6 +792,7 @@ if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
 
 ✅ Pass: $SUCCESS
 🗑 Purge: ${PURGE_PASS}✅ / ${PURGE_FAIL}❌
+🔗 Parked purge: ${#PARKED_DOMAINS[@]}
 ⏩ Nochange: $NOCHANGE
 ❌ Fail: $FAILED
 ⏭ Skip: $SKIPPED
@@ -680,6 +804,13 @@ if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
 
 🗑❌ <b>Purge fail:</b>
 $(echo "$PURGE_FAIL_LIST" | sed 's/^/  - /')"
+    fi
+
+    if [[ ${#NOT_ON_SERVER[@]} -gt 0 ]]; then
+        TG_MSG="$TG_MSG
+
+⚠️ <b>ไม่อยู่บน server:</b>
+$(printf '  - %s\n' "${NOT_ON_SERVER[@]}")"
     fi
 
     TG_RESULT=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
