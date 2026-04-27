@@ -54,6 +54,8 @@ slot1bet.org,ufavisionseoteam16@gmail.com
 
 ### Litespeed-Cloudflare-Api-Update.conf (Private)
 
+แก้ไขที่นี่ ใน Repo Config
+https://github.com/AnonymousVS/config/blob/main/Litespeed-Cloudflare-Api-Update.conf
 **หลาย account (แนะนำ):**
 ```bash
 declare -A CF_TOKENS
