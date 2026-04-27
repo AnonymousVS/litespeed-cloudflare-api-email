@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================
-#  replace-token-email.sh v4.4
+#  replace-token-email.sh v4.5
 #  Bulk Update Cloudflare API Token
 #  LiteSpeed Cache › CDN › Cloudflare
 # ============================================================
@@ -28,6 +28,10 @@
 #   bash <(curl -s https://raw.githubusercontent.com/AnonymousVS/Litespeed-Cloudflare-Api-Update/main/replace-token-email.sh)
 # =============================================================
 # CHANGELOG:
+# v4.5 (2026-04-27)
+#   - Purge CF cache: แสดง purge สำเร็จ/ไม่สำเร็จ + log ชื่อเว็บที่ fail
+# v4.5 (2026-04-27)
+#   - Purge CF: แจ้ง pass/fail count + ชื่อเว็บที่ purge fail ใน Telegram
 # v4.4 (2026-04-27)
 #   - เพิ่ม Purge Cloudflare cache หลังใส่ Token + Zone ID
 # v4.3 (2026-04-27)
@@ -57,7 +61,7 @@
 #   - Single config file, auto-detect จาก CF_EMAIL
 # =============================================================
 
-VERSION="v4.4"
+VERSION="v4.5"
 PRIVATE_REPO="AnonymousVS/config"
 PUBLIC_REPO="AnonymousVS/Litespeed-Cloudflare-Api-Update"
 CF_TOKEN_FILE="Litespeed-Cloudflare-Api-Update.conf"
@@ -499,15 +503,25 @@ process_site() {
     # ── 8. บันทึก Zone ID (wp option update — bypass plugin hooks) ─
     # หมายเหตุ: litespeed-option set จะ trigger plugin save handler
     #           ซึ่ง reset zone เป็นว่าง → ต้องใช้ wp option update แทน
+    local purge_ok=""
     if [[ -n "$zone_id" ]]; then
         wp --path="$dir" option update litespeed.conf.cdn-cloudflare_zone "$zone_id" --allow-root >/dev/null 2>&1
         wp --path="$dir" option update litespeed.conf.cdn-cloudflare_name "$zone_name" --allow-root >/dev/null 2>&1
 
         # ── 8.5 Purge Cloudflare cache ────────────────────────
-        curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${zone_id}/purge_cache" \
+        local purge_result
+        purge_result=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${zone_id}/purge_cache" \
             -H "Authorization: Bearer $SITE_CF_TOKEN" \
             -H "Content-Type: application/json" \
-            -d '{"purge_everything":true}' >/dev/null 2>&1
+            -d '{"purge_everything":true}' 2>/dev/null)
+
+        if echo "$purge_result" | grep -q '"success":true'; then
+            purge_ok="1"
+            touch "${RESULT_DIR}/purge_pass_${UNIQ}"
+        else
+            purge_ok="0"
+            echo "$DOMAIN_NAME" > "${RESULT_DIR}/purge_fail_${UNIQ}"
+        fi
     fi
 
     # ── 9. Verify ─────────────────────────────────────────────
@@ -529,7 +543,10 @@ process_site() {
     [[ -n "$v_zone" ]] && NEW_ZONE_DISPLAY="${NEW_ZONE_DISPLAY}..."
 
     if [[ "$key_ok" == "1" && -n "$v_zone" ]]; then
-        _log  "✅ $LABEL | zone: $OLD_ZONE_DISPLAY → $NEW_ZONE_DISPLAY${FIX_TAG}"
+        local PURGE_TAG=""
+        [[ "$purge_ok" == "1" ]] && PURGE_TAG=" | purge ✅"
+        [[ "$purge_ok" == "0" ]] && PURGE_TAG=" | purge ❌"
+        _log  "✅ $LABEL | zone: $OLD_ZONE_DISPLAY → $NEW_ZONE_DISPLAY${PURGE_TAG}${FIX_TAG}"
         _log_r pass "$SITE | zone: $cur_zone | key: ${v_key:0:12}... | email: $v_email | attempt=${attempt}/${MAX_RETRY}${FIX_TAG}"
         [[ "$was_fixed" == "1" ]] && _log_r mismatch "$SITE | domain ถูกแก้อัตโนมัติ → $DOMAIN"
         touch "${RESULT_DIR}/pass_${UNIQ}"
@@ -610,21 +627,32 @@ log "  ประมวลผลครบ $TOTAL เว็บ"
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))
 
-SUCCESS=$(  find "$RESULT_DIR" -name "pass_*"     2>/dev/null | wc -l)
-FAILED=$(   find "$RESULT_DIR" -name "fail_*"     2>/dev/null | wc -l)
-SKIPPED=$(  find "$RESULT_DIR" -name "skip_*"     2>/dev/null | wc -l)
-NOCHANGE=$( find "$RESULT_DIR" -name "nochange_*"  2>/dev/null | wc -l)
-MISMATCH=$( find "$RESULT_DIR" -name "mismatch_*"  2>/dev/null | wc -l)
+SUCCESS=$(  find "$RESULT_DIR" -name "pass_*"       2>/dev/null | wc -l)
+FAILED=$(   find "$RESULT_DIR" -name "fail_*"       2>/dev/null | wc -l)
+SKIPPED=$(  find "$RESULT_DIR" -name "skip_*"       2>/dev/null | wc -l)
+NOCHANGE=$( find "$RESULT_DIR" -name "nochange_*"   2>/dev/null | wc -l)
+MISMATCH=$( find "$RESULT_DIR" -name "mismatch_*"   2>/dev/null | wc -l)
+PURGE_PASS=$(find "$RESULT_DIR" -name "purge_pass_*" 2>/dev/null | wc -l)
+PURGE_FAIL=$(find "$RESULT_DIR" -name "purge_fail_*" 2>/dev/null | wc -l)
+PURGE_FAIL_LIST=""
+if [[ $PURGE_FAIL -gt 0 ]]; then
+    PURGE_FAIL_LIST=$(cat "$RESULT_DIR"/purge_fail_* 2>/dev/null | sort)
+fi
 
 log "======================================"
 log " สรุปผลรวม  $VERSION"
 log " รวมทั้งหมด      : $TOTAL เว็บ"
 log " ✅ Pass (อัปเดต) : $SUCCESS เว็บ"
+log " 🗑 Purge CF cache : $PURGE_PASS สำเร็จ / $PURGE_FAIL ไม่สำเร็จ"
 log " ⏩ Nochange       : $NOCHANGE เว็บ  (มี key อยู่แล้ว ข้ามตาม CF_OVERWRITE_KEY=no)"
 log " ❌ Fail          : $FAILED เว็บ"
 log " ⏭  Skip          : $SKIPPED เว็บ  (plugin ไม่ active / CF ปิด)"
 log " ⚙️  Auto-fixed    : $MISMATCH เว็บ  (domain ถูกแก้อัตโนมัติจาก folder name)"
 log " เวลาที่ใช้       : $(( ELAPSED / 60 )) นาที $(( ELAPSED % 60 )) วินาที"
+if [[ -n "$PURGE_FAIL_LIST" ]]; then
+    log " 🗑❌ Purge fail   :"
+    echo "$PURGE_FAIL_LIST" | while read -r _pf; do log "    - $_pf"; done
+fi
 log "======================================"
 log " Log รวม         : $LOG_FILE"
 log " ✅ Pass          : $LOG_PASS"
@@ -640,12 +668,19 @@ if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
     TG_MSG="🔄 <b>CF Token Update — $HOSTNAME</b>
 
 ✅ Pass: $SUCCESS
+🗑 Purge: ${PURGE_PASS}✅ / ${PURGE_FAIL}❌
 ⏩ Nochange: $NOCHANGE
 ❌ Fail: $FAILED
 ⏭ Skip: $SKIPPED
-⚙️ Auto-fixed: $MISMATCH
 
 ⏱ $(( ELAPSED / 60 ))m $(( ELAPSED % 60 ))s"
+
+    if [[ -n "$PURGE_FAIL_LIST" ]]; then
+        TG_MSG="$TG_MSG
+
+🗑❌ <b>Purge fail:</b>
+$(echo "$PURGE_FAIL_LIST" | sed 's/^/  - /')"
+    fi
 
     TG_RESULT=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         -d chat_id="$TELEGRAM_CHAT_ID" \
